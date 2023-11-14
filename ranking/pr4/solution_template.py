@@ -10,7 +10,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.tree import DecisionTreeRegressor
 from tqdm.auto import tqdm
 
-from hyperopt import fmin, tpe, hp, anneal, Trials
+# from hyperopt import fmin, tpe, hp, anneal, Trials
 
 
 class Solution:
@@ -78,7 +78,8 @@ class Solution:
 
         query_lambdas = torch.zeros_like(self.ys_train)
         for q in np.unique(self.query_ids_train):
-            idx = (self.query_ids_train == q).nonzero()[0]            
+            idx = (self.query_ids_train == q).nonzero()
+                 
             query_lambdas[idx] = self._compute_lambdas(self.ys_train[idx], train_preds[idx])
         
         object_ind = torch.randperm(self.X_train.size(0))[:sample_length]
@@ -113,6 +114,7 @@ class Solution:
         pred_sum = torch.zeros_like(self.ys_train)
         max_ndcg_ind = 0
 
+
         for i in range(self.n_estimators):
             tree, f_ind = self._train_one_tree(i, pred_sum)
             
@@ -137,9 +139,13 @@ class Solution:
 
     def predict(self, data: torch.FloatTensor) -> torch.FloatTensor:
         res = torch.zeros_like(data[:, 0].reshape(-1,1), dtype=torch.float32)
+        
+        for q in np.unique(self.query_ids_test):
+            idx = (q == self.query_ids_test).nonzero()
+            q_X = data[idx]
 
-        for t, f in zip(self.trees, self.feature_ind):
-            res -= self.lr * torch.FloatTensor(t.predict(data[:,f])).reshape(-1,1)
+            for t, f in zip(self.trees, self.feature_ind):
+                res[idx] -= self.lr * torch.FloatTensor(t.predict(q_X[:,f])).reshape(-1,1)
 
         return res.float()
 
@@ -147,14 +153,14 @@ class Solution:
     def _compute_lambdas(self, y_true: torch.FloatTensor, y_pred: torch.FloatTensor) -> torch.FloatTensor:
         ideal_dcg = compute_ideal_dcg(y_true)
         N = 1 / ideal_dcg if ideal_dcg != 0 else 0
-        
+
         # рассчитаем порядок документов согласно оценкам релевантности
         _, rank_order = torch.sort(y_true, descending=True, axis=0)
         rank_order += 1
         
         with torch.no_grad():
             # получаем все попарные разницы скоров в батче
-            pos_pairs_score_diff = 1.0 + torch.exp(torch.Tensor(y_pred - y_pred.T))
+            pos_pairs_score_diff = 1.0 + torch.exp(y_pred - y_pred.t())
             
             # поставим разметку для пар, 1 если первый документ релевантнее
             # -1 если второй документ релевантнее
@@ -163,7 +169,7 @@ class Solution:
             gain_diff = compute_gain_diff(y_true)
             
             # посчитаем изменение знаменателей-дискаунтеров
-            decay_diff = (1.0 / torch.log2(rank_order + 1.0)) - (1.0 / torch.log2(rank_order.T + 1.0))
+            decay_diff = (1.0 / torch.log2(rank_order + 1.0)) - (1.0 / torch.log2(rank_order.t() + 1.0))
             # посчитаем непосредственное иsзменение nDCG
             delta_ndcg = torch.abs(N * gain_diff * decay_diff)
             # посчитаем лямбды
@@ -225,7 +231,7 @@ def gain(x):
 def compute_labels_in_batch(y_true: torch.Tensor):
     
     # разница релевантностей каждого с каждым объектом
-    rel_diff = y_true - y_true.T
+    rel_diff = y_true - y_true.t()
     
     # 1 в этой матрице - объект более релевантен
     pos_pairs = (rel_diff > 0).type(torch.float32)
@@ -236,7 +242,7 @@ def compute_labels_in_batch(y_true: torch.Tensor):
     return Sij
 
 def compute_gain_diff(y_true: torch.Tensor):
-   return torch.pow(2.0, y_true) - torch.pow(2.0, y_true.T)
+   return torch.pow(2.0, y_true) - torch.pow(2.0, y_true.t())
 
 def compute_gain(y_value: float) -> float:
     return float(2 ** y_value - 1)
@@ -266,53 +272,3 @@ def ndcg(ys_true: torch.Tensor, ys_pred: torch.Tensor, top=10) -> float:
 def compute_ideal_dcg(ys_true, top=10):
     return dcg(ys_true, ys_true, top)
 
-
-def func(params):
-    sol = Solution(**params)
-    sol.fit()
-
-    loss = sol._calc_data_ndcg(sol.query_ids_test, sol.ys_test, sol.predict(sol.X_test))
-    
-    return loss
-
-def hyper(n_iter = 100):
-    space = {
-        'n_estimators': hp.quniform('n_estimators', 50, 100, 1),
-        'max_depth': hp.quniform('max_depth', 2, 20, 1),
-        'min_samples_leaf': hp.quniform('min_samples_leaf', 1, 10, 1),
-        'lr': hp.loguniform('lr', 0.01, 1)
-    }
-
-    trials = Trials()
-
-    best=fmin(fn=func, # function to optimize
-            space=space, 
-            algo=tpe.suggest, # optimization algorithm, hyperotp will select its parameters automatically
-            max_evals=n_iter, # maximum number of iterations
-            trials=trials, # logging
-            rstate=np.random.default_rng(28)# fixing random state for the reproducibility
-        )
-    
-    print(f'best: {best}')
-    
-    return best
-
-
-if __name__ == '__main__':
-    best = hyper(10)
-
-    sol = Solution(**best)
-    sol.fit()
-    print(f'NDCG: {sol._calc_data_ndcg(sol.query_ids_test, sol.ys_test, sol.predict(sol.X_test))}')
-    sol.save_model('model')
-
-    sol = Solution()
-    sol.fit()
-    print(f'NDCG: {sol._calc_data_ndcg(sol.query_ids_test, sol.ys_test, sol.predict(sol.X_test))}')
-    sol.save_model('model')
-    
-    
-
-    # new_sol = Solution()
-    # new_sol.load_model('model')
-    # print(f'NDCG: {sol._calc_data_ndcg(new_sol.query_ids_test, new_sol.ys_test, new_sol.predict(new_sol.X_test))}')
